@@ -1,7 +1,7 @@
 """Run the contrastive analyst prompt over trajectory pairs with a vLLM OpenAI-compatible server.
 
 Start the server first (see notebooks/run_contrastive_analyst.ipynb), then:
-    python scripts/run_analyst.py --base-url http://localhost:8000/v1 --benchmarks officeqa livemath --limit 20
+    python scripts/run_analyst.py --base-url http://localhost:8000/v1 --pairs-dir <pairs>/pairs --benchmarks officeqa livemath --limit 20
 
 Outputs (resumable — finished pair_ids are skipped on re-run):
     outputs/<tag>/<benchmark>.jsonl    one analyst result per pair
@@ -65,10 +65,16 @@ def extract_json(text: str) -> dict | None:
         return None
 
 
-def load_pairs(benchmarks: list[str], limit: int, sources: list[str], seed: int) -> list[dict]:
+def load_pairs(pairs_dir: Path, benchmarks: list[str], limit: int, sources: list[str], seed: int) -> list[dict]:
     pairs = []
     for b in benchmarks:
-        rows = [json.loads(l) for l in (REPO / "data" / "pairs" / f"{b}.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+        path = pairs_dir / f"{b}.jsonl"
+        if not path.exists():
+            print(f"[{b}] no pairs file ({path})")
+            continue
+        rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        for r in rows:
+            r["_base"] = str(pairs_dir.parent)  # image paths are relative to the folder holding pairs/
         rows = [r for r in rows if r["source"] in sources]
         if limit and len(rows) > limit:
             # keep natural pairs (rare) first, then a fixed random sample of the rest
@@ -82,7 +88,8 @@ def load_pairs(benchmarks: list[str], limit: int, sources: list[str], seed: int)
 
 def build_messages(system: str, pair: dict) -> list[dict]:
     if pair.get("image"):
-        img = (REPO / pair["image"]).read_bytes()
+        img_path = Path(pair.get("_base", REPO)) / pair["image"]
+        img = img_path.read_bytes()
         mime = "image/png" if pair["image"].endswith(".png") else "image/jpeg"
         user = [
             {"type": "text", "text": "Document image (shared input given to both trajectories):"},
@@ -161,6 +168,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--prompt", default="prompts/contrastive_analyst.md")
     ap.add_argument("--tag", default="run1")
+    ap.add_argument("--pairs-dir", type=Path, required=True, help="folder with <bench>.jsonl pairs (build_pairs.py)")
+    ap.add_argument("--out-dir", type=Path, help="default: outputs/<tag>")
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--max-tokens", type=int, default=2048)
     ap.add_argument("--workers", type=int, default=8)
@@ -170,18 +179,18 @@ def main() -> None:
     args = ap.parse_args()
 
     system = (REPO / args.prompt).read_text(encoding="utf-8")
-    out_dir = REPO / "outputs" / args.tag
+    out_dir = args.out_dir or REPO / "outputs" / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "config.json").write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
+    (out_dir / "config.json").write_text(json.dumps(vars(args), indent=2, default=str), encoding="utf-8")
 
     done = set()
     for f in out_dir.glob("*.jsonl"):
         done |= {json.loads(l)["pair_id"] for l in f.read_text(encoding="utf-8").splitlines() if l.strip()}
-    pairs = [p for p in load_pairs(args.benchmarks, args.limit, args.sources, args.seed) if p["pair_id"] not in done]
+    pairs = [p for p in load_pairs(args.pairs_dir, args.benchmarks, args.limit, args.sources, args.seed) if p["pair_id"] not in done]
     print(f"{len(pairs)} pairs to run ({len(done)} already done)", flush=True)
 
     client = OpenAI(base_url=args.base_url, api_key="dummy", timeout=1800)
-    files = {b: open(out_dir / f"{b}.jsonl", "a", encoding="utf-8") for b in args.benchmarks}
+    files = {b: open(out_dir / f"{b}.jsonl", "a", encoding="utf-8") for b in {p["benchmark"] for p in pairs}}
     with ThreadPoolExecutor(args.workers) as ex:
         futs = [ex.submit(call, client, args, system, p) for p in pairs]
         for i, fut in enumerate(as_completed(futs), 1):

@@ -1,28 +1,33 @@
-"""Build contrastive (failed, successful) trajectory pairs from the no-PI / PI baseline runs.
+"""Build contrastive (failed, successful) trajectory pairs from the no-PI / PI rollouts.
 
-Run this LOCALLY (the raw results are not in the repo). It writes, inside the repo:
-    data/pairs/<benchmark>.jsonl   one pair per line, with the analyst user message pre-rendered
-    data/images/<file>.png         DocVQA page images referenced by the pairs
-    data/pairs/summary.json        pair counts per benchmark / source
+Reads the stage-1 rollouts (scripts/run_rollouts.py) and writes, under --out-dir:
+    pairs/<benchmark>.jsonl   one pair per line, with the analyst user message pre-rendered
+    images/<file>.png         DocVQA page images referenced by the pairs (path relative to --out-dir)
+    pairs/summary.json        pair counts per benchmark / source
 
 A pair exists when the two runs disagree on the same task:
     no-PI fail  + PI success  -> source "hindsight" (success saw the reference answer)
     no-PI success + PI fail   -> source "natural"   (success saw nothing extra)
 
-Usage:
-    python scripts/build_pairs.py --results-root <.../results/no-skill_baseline>
+Usage (notebook layout, one folder per benchmark):
+    python scripts/build_pairs.py --nopi-root <drive>/rollouts/nopi --pi-root <drive>/rollouts/pi --out-dir <drive>/pairs
+Earlier baseline layout:
+    --nopi-root .../qwen3.5-9B/run1 --nopi-fmt "{prefix}_noskill_full" \
+    --pi-root .../qwen3.5-9B-PI/run1 --pi-fmt "{prefix}_noskill_pi_full"
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import shutil
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+HARNESS = REPO / "skillopt_harness"
 
-BENCHMARKS = {  # name used in this repo -> folder prefix used by the baseline runs
+BENCHMARKS = {  # name used in this repo -> SkillOpt env name (folder prefix of the earlier baseline runs)
     "searchqa": "searchqa",
     "docvqa": "docvqa",
     "officeqa": "officeqa",
@@ -133,10 +138,21 @@ def strip_reference(prompt: str) -> str:
     return prompt.strip()
 
 
-def build_user_message(task: str, fail_steps: list[str], fail_eval: str,
+def docvqa_image_paths() -> dict[str, str]:
+    """question id -> page image, from the harness DocVQA split files (written by materialize_docvqa.py)."""
+    out = {}
+    for f in (HARNESS / "data" / "docvqa" / "splits").glob("*/items.csv"):
+        with open(f, encoding="utf-8", newline="") as fh:
+            for row in csv.DictReader(fh):
+                out[str(row.get("id") or row.get("questionId"))] = row.get("image_path", "")
+    return out
+
+
+def build_user_message(system: str, task: str, fail_steps: list[str], fail_eval: str,
                        succ_steps: list[str], succ_answer: str, source: str) -> str:
     return "\n\n".join([
         "## Current Skill\n(empty)",
+        "## Agent instructions (system prompt given to both trajectories)\n" + (system.strip() or "(not recorded)"),
         "## Task (shared input given to both trajectories)\n" + truncate(task, TASK_MAX - 4000, 4000),
         "## FAILED trajectory"
         + (" (was shown the reference answer)" if source == "natural" else "")
@@ -148,22 +164,29 @@ def build_user_message(task: str, fail_steps: list[str], fail_eval: str,
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--results-root", type=Path, required=True,
-                    help="folder that holds qwen3.5-9B/ and qwen3.5-9B-PI/")
-    ap.add_argument("--nopi", default="qwen3.5-9B/run1")
-    ap.add_argument("--pi", default="qwen3.5-9B-PI/run1")
+    ap.add_argument("--nopi-root", type=Path, required=True, help="no-PI rollouts, one folder per benchmark")
+    ap.add_argument("--pi-root", type=Path, required=True, help="PI rollouts, one folder per benchmark")
+    ap.add_argument("--nopi-fmt", default="{bench}", help="benchmark folder name ({bench} or {prefix})")
+    ap.add_argument("--pi-fmt", default="{bench}")
+    ap.add_argument("--out-dir", type=Path, required=True)
+    ap.add_argument("--benchmarks", nargs="+", default=list(BENCHMARKS), choices=list(BENCHMARKS))
     ap.add_argument("--ss-feedback", choices=["cells", "full"], default="cells",
                     help="SpreadsheetBench feedback: 'cells' hides expected values, 'full' keeps them")
     args = ap.parse_args()
 
-    out_dir, img_dir = REPO / "data" / "pairs", REPO / "data" / "images"
+    out_dir, img_dir = args.out_dir / "pairs", args.out_dir / "images"
     out_dir.mkdir(parents=True, exist_ok=True)
     img_dir.mkdir(parents=True, exist_ok=True)
     summary = {}
+    doc_images = docvqa_image_paths() if "docvqa" in args.benchmarks else {}
 
-    for bench, prefix in BENCHMARKS.items():
-        nopi_dir = args.results_root / args.nopi / f"{prefix}_noskill_full"
-        pi_dir = args.results_root / args.pi / f"{prefix}_noskill_pi_full"
+    for bench in args.benchmarks:
+        prefix = BENCHMARKS[bench]
+        nopi_dir = args.nopi_root / args.nopi_fmt.format(bench=bench, prefix=prefix)
+        pi_dir = args.pi_root / args.pi_fmt.format(bench=bench, prefix=prefix)
+        if not (nopi_dir / "results.jsonl").exists() or not (pi_dir / "results.jsonl").exists():
+            print(f"{bench:18s} skipped: results.jsonl missing under {nopi_dir} or {pi_dir}")
+            continue
         a, b = load_results(nopi_dir / "results.jsonl"), load_results(pi_dir / "results.jsonl")
         rows, counts = [], {"hindsight": 0, "natural": 0, "skipped": 0}
 
@@ -182,6 +205,8 @@ def main() -> None:
                 counts["skipped"] += 1
                 continue
             task = strip_reference(task)
+            sys_path = f_dir / "predictions" / fid / "target_system_prompt.txt"
+            system = sys_path.read_text(encoding="utf-8") if sys_path.exists() else ""
 
             f_steps = trajectory_steps(f_conv, bench, args.ss_feedback)
             s_steps = trajectory_steps(s_conv, bench, args.ss_feedback)
@@ -195,11 +220,13 @@ def main() -> None:
 
             image = None
             if bench == "docvqa":
-                # images are named q<task_id>_d<doc_id>.png
+                # earlier baselines saved <run>/images/q<task_id>_d<doc_id>.png;
+                # new rollouts read the page from the harness split (item image_path)
                 found = sorted((nopi_dir / "images").glob(f"q{fid}_*"))
-                if found:
-                    shutil.copy2(found[0], img_dir / found[0].name)
-                    image = f"data/images/{found[0].name}"
+                src = found[0] if found else Path(doc_images.get(tid) or "/nonexistent")
+                if src.is_file():
+                    shutil.copy2(src, img_dir / src.name)
+                    image = f"images/{src.name}"
 
             rows.append({
                 "pair_id": f"{bench}:{tid}",
@@ -210,7 +237,7 @@ def main() -> None:
                 "image": image,
                 "n_fail_steps": len(f_steps),
                 "n_succ_steps": len(s_steps),
-                "user_message": build_user_message(task, f_steps, fail_eval, s_steps,
+                "user_message": build_user_message(system, task, f_steps, fail_eval, s_steps,
                                                    final_answer(s_run[tid]), source),
             })
             counts[source] += 1
@@ -218,8 +245,10 @@ def main() -> None:
         with open(out_dir / f"{bench}.jsonl", "w", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        summary[bench] = counts
-        print(f"{bench:18s} hindsight={counts['hindsight']:4d} natural={counts['natural']:3d} skipped={counts['skipped']}")
+        summary[bench] = {**counts, "n_nopi": len(a), "nopi_acc": sum(map(is_success, a.values())) / max(len(a), 1),
+                          "n_pi": len(b), "pi_acc": sum(map(is_success, b.values())) / max(len(b), 1)}
+        print(f"{bench:18s} no-PI {summary[bench]['nopi_acc']:.1%} (n={len(a)})  PI {summary[bench]['pi_acc']:.1%} "
+              f"(n={len(b)})  hindsight={counts['hindsight']:4d} natural={counts['natural']:3d} skipped={counts['skipped']}")
 
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 

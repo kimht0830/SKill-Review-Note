@@ -2,3 +2,11 @@ outputs/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+# SkillOpt data generated on Colab by skillopt_harness/scripts/materialize_*.py
+skillopt_harness/data/searchqa_split/
+skillopt_harness/data/spreadsheetbench_split/
+skillopt_harness/data/officeqa_split/
+skillopt_harness/data/livemathematicianbench_split/
+skillopt_harness/data/docvqa/
+skillopt_harness/data/officeqa_docs_official/
+skillopt_harness/data/spreadsheetbench_verified_400/
