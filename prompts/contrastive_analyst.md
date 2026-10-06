@@ -6,7 +6,9 @@ document. Because both trajectories solve the same task, the cause of the
 different outcomes lies in where their behavior diverges.
 
 The successful trajectory has a source tag:
-- "natural": the agent succeeded without extra information.
+- "natural": the agent succeeded without extra information. In this case the
+  FAILED trajectory was shown the reference answer but still failed, so it may
+  mention that answer; analyze what it did wrong, not the answer it was given.
 - "hindsight": the agent was shown the reference answer while solving.
   Its reasoning may be reverse-engineered to fit the answer. Do NOT trust its
   arguments. Trust only evidence it actually found (tool outputs, document

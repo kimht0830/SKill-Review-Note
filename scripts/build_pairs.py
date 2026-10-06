@@ -138,7 +138,9 @@ def build_user_message(task: str, fail_steps: list[str], fail_eval: str,
     return "\n\n".join([
         "## Current Skill\n(empty)",
         "## Task (shared input given to both trajectories)\n" + truncate(task, TASK_MAX - 4000, 4000),
-        f"## FAILED trajectory\n{fail_eval}\n\n" + render_steps("F", fail_steps),
+        "## FAILED trajectory"
+        + (" (was shown the reference answer)" if source == "natural" else "")
+        + f"\n{fail_eval}\n\n" + render_steps("F", fail_steps),
         f"## SUCCESSFUL trajectory (source: {source})\nFinal answer: {succ_answer}\nResult: CORRECT\n\n"
         + render_steps("S", succ_steps),
     ])
