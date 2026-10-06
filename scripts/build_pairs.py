@@ -40,8 +40,13 @@ TASK_MAX = 24000                    # task prompt truncation (chars)
 MIN_STEP_CHARS = 250                # merge text paragraphs shorter than this
 
 
-def folder_id(task_id: str) -> str:
-    return str(task_id).replace(":", "_").replace("/", "_")
+def pred_dir(run_dir: Path, task_id: str) -> Path:
+    """predictions/<id>/ as written by SkillOpt. On Linux (Colab) the raw id is used (e.g. LiveMath
+    "202602:21"); copies made on Windows have ":" and "/" replaced by "_"."""
+    raw = run_dir / "predictions" / str(task_id)
+    if raw.is_dir():
+        return raw
+    return run_dir / "predictions" / str(task_id).replace(":", "_").replace("/", "_")
 
 
 def is_success(r: dict) -> bool:
@@ -196,16 +201,18 @@ def main() -> None:
                 continue
             source = "hindsight" if sb else "natural"
             (f_run, f_dir), (s_run, s_dir) = ((a, nopi_dir), (b, pi_dir)) if sb else ((b, pi_dir), (a, nopi_dir))
-            fid = folder_id(tid)
+            f_pred, s_pred = pred_dir(f_dir, tid), pred_dir(s_dir, tid)
             try:
-                f_conv = json.loads((f_dir / "predictions" / fid / "conversation.json").read_text(encoding="utf-8"))
-                s_conv = json.loads((s_dir / "predictions" / fid / "conversation.json").read_text(encoding="utf-8"))
-                task = (nopi_dir / "predictions" / fid / "target_user_prompt.txt").read_text(encoding="utf-8")
-            except FileNotFoundError:
+                f_conv = json.loads((f_pred / "conversation.json").read_text(encoding="utf-8"))
+                s_conv = json.loads((s_pred / "conversation.json").read_text(encoding="utf-8"))
+                task = (pred_dir(nopi_dir, tid) / "target_user_prompt.txt").read_text(encoding="utf-8")
+            except FileNotFoundError as e:
                 counts["skipped"] += 1
+                if counts["skipped"] <= 3:
+                    print(f"  [{bench}] skipped {tid}: {e.filename} not found")
                 continue
             task = strip_reference(task)
-            sys_path = f_dir / "predictions" / fid / "target_system_prompt.txt"
+            sys_path = f_pred / "target_system_prompt.txt"
             system = sys_path.read_text(encoding="utf-8") if sys_path.exists() else ""
 
             f_steps = trajectory_steps(f_conv, bench, args.ss_feedback)
@@ -222,7 +229,7 @@ def main() -> None:
             if bench == "docvqa":
                 # earlier baselines saved <run>/images/q<task_id>_d<doc_id>.png;
                 # new rollouts read the page from the harness split (item image_path)
-                found = sorted((nopi_dir / "images").glob(f"q{fid}_*"))
+                found = sorted((nopi_dir / "images").glob(f"q{pred_dir(nopi_dir, tid).name}_*"))
                 src = found[0] if found else Path(doc_images.get(tid) or "/nonexistent")
                 if src.is_file():
                     shutil.copy2(src, img_dir / src.name)
