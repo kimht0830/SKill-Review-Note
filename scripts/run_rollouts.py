@@ -5,6 +5,9 @@ earlier no-skill baselines) with an empty skill, once per benchmark:
     --mode nopi  ->  scripts/eval_only.py
     --mode pi    ->  scripts/eval_only_pi.py  (reference answer prepended to the user turn, pi_config.json)
 
+With --skill-dir, <skill-dir>/<benchmark>.md is used as the skill instead (benchmarks without
+one are skipped) — used to evaluate a skill built from validated rules on the test split.
+
 Output: <out-root>/<benchmark>/ with results.jsonl, predictions/<id>/, eval_summary.json, run_config.json.
 Re-running resumes: finished items are skipped (SpreadsheetBench returns an existing results.jsonl as is).
 
@@ -58,6 +61,7 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=int, default=8000)
     ap.add_argument("--workers", type=int, default=32)
     ap.add_argument("--print-every", type=int, default=10)
+    ap.add_argument("--skill-dir", type=Path, help="use <skill-dir>/<benchmark>.md as the skill (default: empty)")
     args = ap.parse_args()
 
     empty = args.out_root / "empty_skill.md"
@@ -71,6 +75,12 @@ def main() -> None:
     failed = []
     for bench in args.benchmarks:
         env_name = SKILLOPT_ENV.get(bench, bench)
+        skill = empty
+        if args.skill_dir:
+            skill = args.skill_dir / f"{bench}.md"
+            if not skill.exists():
+                print(f"===== {bench}: no skill file {skill} -> skipped =====", flush=True)
+                continue
         out = args.out_root / bench
         out.mkdir(parents=True, exist_ok=True)
         cfg = [f"env.workers={args.workers}", "model.target_qwen_chat_thinking_mode=disabled",
@@ -78,12 +88,12 @@ def main() -> None:
                f"model.target_qwen_chat_max_tokens={args.max_tokens}"]
         if args.limit:
             cfg.append(f"evaluation.test_env_num={args.limit}")
-        cmd = [sys.executable, script, "--config", f"configs/{env_name}/default.yaml", "--skill", str(empty),
+        cmd = [sys.executable, script, "--config", f"configs/{env_name}/default.yaml", "--skill", str(skill),
                "--split", split, "--target_backend", "qwen_chat", "--target_model", args.model,
                "--out_root", str(out), "--cfg-options", *cfg]
         (out / "run_config.json").write_text(json.dumps(
             {"mode": args.mode, "split": args.split, "model": args.model, "limit": args.limit,
-             "cfg_options": cfg, "harness": "skillopt_harness (SkillOpt fa4ca18)"}, indent=2), encoding="utf-8")
+             "cfg_options": cfg, "skill": str(skill) if args.skill_dir else "none (empty file)", "harness": "skillopt_harness (SkillOpt fa4ca18)"}, indent=2), encoding="utf-8")
         print(f"\n===== {args.mode} / {bench} =====\n$ {' '.join(cmd)}", flush=True)
         if run_streaming(cmd, out / "eval_stdout.log", env, args.print_every) != 0:
             failed.append(bench)
