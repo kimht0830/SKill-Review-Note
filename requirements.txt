@@ -1,0 +1,3 @@
+openai>=1.40
+json_repair
+# vllm is installed separately in the Colab notebook (pip install -U vllm)
